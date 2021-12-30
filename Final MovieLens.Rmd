@@ -1,0 +1,321 @@
+---
+title: "MovieLensProject"
+author: "Idxian D Gonzalez"
+date: "11/27/2021"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This project is developed as part as a requirement for the Data Science: Capstone course, this is the final course of the EdX Data Science professional certificate. The purpose of this report is to apply the concepts and methods learned through the eight courses journey. *MovieLens 10M dataset* was used to generate this report. 
+
+The *MovieLens Dataset* was developed in 1997 by researchers of the University of Minnesota, with the aim of describing people’s preferences for movies of distinct genres. GroupLens is the organization in charge of the page where this data is provided. This dataset is widely used for academic purposes as well as in the film industry and has undergone several changes in its structure over the years (Harper & Konstan, 2015). 
+
+The specific aim of this project is to predict movie ratings and determine the root mean square estimates [RMSE] score to evaluate the success of the prediction. RMSE is a statistical metric to measure a model performance through a score that indicates how accurate is the prediction made. A lower RMSE score indicates more accuracy from the model. The goal of this project is to obtain an RMSE score < 0.86490.
+
+```{r load}
+##Making sure required packages are available##
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
+if(!require(Metrics)) install.packages("Metrics", repos = "http://cran.us.r-project.org")
+if(!require(tidyr)) install.packages("tidyr", repos = "http://cran.us.r-project.org")
+
+##Setting libraries##
+library(tidyverse)
+library(caret)
+library(lubridate)
+library(data.table)
+library(Metrics)
+library(tidyr)
+
+##Movie Lens 10M Dataset##
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- read.table(text = gsub("::", "\t", readLines(unzip(dl,"ml-10M100K/ratings.dat")))
+                      , col.names = c("userId","movieId","rating","timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::",3)
+
+colnames(movies) <- c("movieId","title","genres")
+
+##Since I'm using R 4.0.5##
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),title = 
+                                             as.character(title), genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1)
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+```
+
+# Methods/analysis
+## Data exploration
+
+*MovieLens 10M dataset* was divided into two datasets: *edx* & *validation*. The *edx* dataset consists of 90% of the data, while the *validation* dataset consists of 10% of the remaining data. We will be making our predictions using the *edx* dataset.The composition of both sets is the following:
+
+```{r}
+str(edx) ## Evaluate Edx Set
+str(validation) ## Evaluate Validation Set
+head(edx) ## See top Rows
+```
+
+The timestamp variable seems to be in a strange format, we can change it to a datetime format with the following code:
+
+```{r, Change Datetime}
+edx <-  edx %>% mutate (timestamp = as_datetime(timestamp)) ## changes date into a readable format
+
+head(edx)
+                      
+```
+
+Now we can look at the *edx* data set and see that the date is in a much friendlier format. The movie year appears to be embedded inside the movie title. We can extract the year with the following code:
+
+```{r, Extract Year}
+edx <-  edx %>% mutate (year = substring(title, nchar(title) - 6 )) ## Extracting Year from title name
+
+head(edx)
+```    
+
+
+This more or less worked, however there are still parentheses in the data. We can remove those with the following code:
+
+
+```{r, remove parens}
+edx$year <- gsub("[()]", "", edx$year) ## Removing parenthesis
+
+```
+
+This worked, but seeing as year was a string we just manipulated, its probably not in a numeric format where we can properly process it. Lets fix this:
+
+```{r, coerce numeric}
+
+edx$year <- as.numeric(edx$year ) ## Coerce string into number
+str(edx)
+
+```
+
+It will also be necessary to split the genres by movie, as a movie can have multiple genres separated by pipes:
+
+```{r,stringsplit }
+
+edx <- edx %>% separate_rows(genres, sep = "\\|") 
+## use separate_rows function split genres into single values.
+##Movies with multiple genres will be duplicated in the dataset
+head(edx)
+
+
+
+```
+
+
+Finally, we will need to make the same transformations to the validation file to keep everything equal
+
+```{r, Fix Validation Set }
+validation <-  validation %>% mutate (timestamp = as_datetime(timestamp))
+## Repeat all steps for validation set
+validation <-  validation %>% mutate (year = substring(title, nchar(title) - 6 ))
+## Extract Year  
+validation$year <- gsub("[()]", "", validation$year) ## Remove Parens
+validation$year <- as.numeric(validation$year ) ## coerce Numeric
+validation <- validation %>% separate_rows(genres, sep = "\\|") 
+## use separate_rows function split genres into single values. Movies with multiple
+## genres will be duplicated in the dataset
+
+str(validation)
+```
+
+## Data visualization
+
+All the visualizations and analysis will be made using the *edx* data set.
+*edx* variable classes are:
+```{r}
+sapply(edx,class) ## Validate class of variables
+```
+### Genres
+
+Having successfully loaded and wrangled the data, we can create a summary dataframe to examine the distribution of genres across movies. We can do so with the following code:
+
+```{r} 
+df <- edx %>% group_by(genres) %>% summarise(n = n()) ## See top N genre distribution
+
+
+```
+
+We can also examine the distribution of genres by frequency:
+
+```{r}
+
+head(df[order(-df$n),]) ## Sort by tops
+
+```
+
+We can observe that the top 3 genres are Drama, Comedy and Action. We can further validate this by looking at the frequency distribution of the Genre variable: 
+
+```{r top6}
+head(df[order(-df$n),]) %>% ## Feed reduced table for graphing
+ggplot(aes(x = reorder(genres, -n), n)) +
+geom_bar(stat="identity") + scale_y_continuous(limits=c(0,10000000)) ## Create plot to see top genre 
+```
+
+### Ratings
+
+In *MovieLens* the ratings are expressed as a star value.
+Literature suggests that this variable experienced a change by 2003, when the rating classification system shifted from a whole star to half stars ratings (Harper & Konstan,2015,p.8). A new dataframe was developed in order to obtain the average rating per year.
+
+
+The following plot shows that until the 1980's the variability of the data was higher, but by 1990 the variability seems to be less. This suggests that the variable year might be an important feature in modeling for ratings, since variable dispersion seems to decrease the closer we get to the present. We can see this is in the following plot:
+
+
+```{r}
+edxavg_rating <- edx %>%  group_by(year) %>% 
+  summarize(avg_ratings = mean(rating,trim = 0,na.rm = FALSE)) 
+## create DataFrame with average ratings by year
+edxavg_rating %>% ggplot(aes(x = year,y = avg_ratings)) + 
+geom_point() + scale_y_continuous(limits=c(0,5)) ## plot average ratings per year
+```
+# Results
+
+Having evaluated these variables, we can begin constructing our model to predict ratings. Our goal for this task is to generate a model that can minimize the RMSE for this particular data set. We will be using the *edx* data set to train the model, and validating it's input with the *validation* dataset. We will be using the RMSE function from the Metrics package for this:
+
+```{r}
+avg <- mean(edx$rating)  # Mean movie rating in EDX set
+RMSECalc <- rmse(avg,validation$rating) # RMSE calculations
+RMSECalc #Display RMSE 
+
+
+```
+
+
+This model gives us an RMSE of 1.052, which means that the average prediction would be almost 1.05 stars away from the actual value. Maybe we can get this down further by utilizing more variables in our model. We can evaluate the effect of year added to this average with the following code:
+
+
+```{r}
+
+year <- edx %>%
+  group_by(year) %>% # Group Data by year
+  summarize(diff = mean(rating - avg)) # calculate difference between average value and actual value
+
+
+ratingsbyyear <- validation %>%  left_join(year, by = "year") %>% # Join on Year
+  mutate(ratingprediction =  diff + avg) %>% # Generate new predictions
+  pull(ratingprediction)  # retrieve 
+
+rmse_Year <- rmse(ratingsbyyear,validation$rating)  # calculate RMSE for model
+
+rmse_Year
+
+
+```
+
+This model gives us an RMSE of 1.042, which is lower than our average model but not by much. We can try the same process with the *UserId* variable to validate the effect over the general average:
+
+```{r}
+
+user <- edx %>%
+  group_by(userId) %>% # Group Data by UserId
+  summarize(diff = mean(rating - avg)) # calculate difference between average value and actual value
+
+
+ratingsbyUser <- validation %>%  left_join(user, by = "userId") %>% # Join on UserId
+  mutate(ratingprediction =  diff + avg) %>% # Generate new predictions
+  pull(ratingprediction)  # retrieve 
+
+rmse_User <- rmse(ratingsbyUser,validation$rating)  # calculate RMSE for model
+
+rmse_User
+
+
+```
+
+Taking into account the *UserId* as a variable, we can get a RMSE of 0.973, which is considerably lower than the previous 1.05. This variable thus far seems to have the most effect over the rating variable. Finally, we can try the *MovieId* variable as a predictor on top of the average with the following code:
+
+```{r}
+
+movieId <- edx %>%
+  group_by(movieId) %>% # Group Data by movieId
+  summarize(diff = mean(rating - avg)) # calculate difference between average value and actual value
+
+
+ratingsbymovie <- validation %>%  left_join(movieId, by = "movieId") %>% # Join on movieId
+  mutate(ratingprediction =  diff + avg) %>% # Generate new predictions
+  pull(ratingprediction)  # retrieve 
+
+rmse_movie <- rmse(ratingsbymovie,validation$rating)  # calculate RMSE for model
+
+rmse_movie
+
+
+```
+
+
+This model has an RMSE of 0.941, which is again lower than our best estimate of 0.97. After our initial data visualizations seemed to suggest that the *year* variable was important in predicting a movie rating, our RMSE estimates show that the most impactful variables on ratings are the *UserId* and the *MovieId*. We can explore both of them at the same time with the following code:
+
+
+```{r}
+
+movie <- edx %>% group_by(movieId) %>% summarize(diff1 = mean (rating - avg)) ## Calculate movie effect
+
+user <-  edx %>% left_join(movie, by = "movieId") %>% group_by(userId) %>% 
+summarize(diff2 = mean(rating - avg - diff1)) #calculate user effect, given movie effect
+
+pred <- validation %>% left_join(movie, by = "movieId") %>% 
+  left_join(user, by = "userId") %>% mutate(prediction = avg + diff1 + diff2) %>% pull(prediction)
+# compare predicted values to validation dataset
+
+rmse_user_movie <- rmse(validation$rating, pred) ## calculate RMSE 
+
+rmse_user_movie # View RMSE 
+
+
+
+```
+
+
+With this combined model, we get an RMSE of 0.8635, which is notably lower than all our individual predictions. As such, we conclude this assignment by generating a model which provides a RMSE of 0.8635 by utilizing the variables *UserId* and *MovieId* as predictors.
+
+# Conclusion
+
+*MovieLens 10M* dataset was analyzed, the variables *MovieId* and *UserId* seems to be meaningful in the data prediction model. When we develop a model considering both we get a lower RMSE score.
+
+Specifically the final RMSE achieved in the model was:
+
+``` {r}
+rmse_user_movie
+```
+## Limitations
+
+Regularization of the data was excluded from this analysis, further wrangling of the data could yield more precise models.
+
+
+## Future Work
+
+Further analysis should consider other variables, this could lead to the improvement of the model.
+
+# References
+
+Harper, F. M., & Konstan, J. A. (2015). The movielens datasets: History and context. *Acm transactions on  interactive intelligent systems (tiis), 5*(4), 1-19.
